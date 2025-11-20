@@ -20,12 +20,13 @@ CREATE TABLE gamedatas (
   user_id INT NOT NULL,
   gold INT NOT NULL DEFAULT 10000,
   last_action VARCHAR(255) DEFAULT NULL,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 EOF
 )
 
 # MySQL 접속 및 실행
-mysql -u damauser -p password -h pjt-seoul-rds.cnwgggeo65yy.ap-northeast-2.rds.amazonaws.com -e "${SQL_COMMANDS}"
+mysql -u damauser -p -h pjt-seoul-rds.cnwgggeo65yy.ap-northeast-2.rds.amazonaws.com -e "${SQL_COMMANDS}"
+password
+
