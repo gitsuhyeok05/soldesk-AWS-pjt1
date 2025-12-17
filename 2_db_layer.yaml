@@ -1,0 +1,251 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Default IDC stack for the Project
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project Name
+  RegionName:
+    Type: String
+    Description: Region Name
+    Default: idc
+
+Mappings:
+  CidrMap:
+    ap-northeast-2:
+      VpcCidr: 10.2.0.0/16
+      PubSn1Cidr: 10.2.1.0/24
+      PriSn2Cidr: 10.2.2.0/24
+  AmiMap:
+    ap-northeast-2:
+      Ami: ami-0f970a44e02f25083
+
+
+Resources:
+# VPC & Internet Gateway
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [CidrMap, !Ref "AWS::Region", VpcCidr]
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${RegionName}-vpc"
+
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${RegionName}-igw"
+
+  IgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref Igw
+      VpcId: !Ref Vpc
+
+# Public Subnet & Route Table
+  PubSn1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !FindInMap [CidrMap, !Ref "AWS::Region", PubSn1Cidr]
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${RegionName}-pub-sn1"
+
+  PubRt1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${RegionName}-pub-rt1"
+
+  PubRt1Sn1Association:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PubRt1
+      SubnetId: !Ref PubSn1
+
+  PubRt1DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttachment
+    Properties:
+      RouteTableId: !Ref PubRt1
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+
+# Private Subnet & Route Table
+  PriSn2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !FindInMap [CidrMap, !Ref "AWS::Region", PriSn2Cidr]
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${RegionName}-pri-sn2"
+
+  PriRt2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${RegionName}-pri-sn2"
+
+  PriRt2Sn2Association:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PriRt2
+      SubnetId: !Ref PriSn2
+
+  PriRt2DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: NatGateway
+    Properties:
+      RouteTableId: !Ref PriRt2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+# NAT Gateway & EIP
+  NatGatewayEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${RegionName}-eip-nat"
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: NatGatewayEip
+    Properties:
+      AllocationId: !GetAtt NatGatewayEip.AllocationId
+      SubnetId: !Ref PubSn1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${RegionName}-nat-gw"
+
+# CGW & Security Group
+  CgwSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${AWS::Region} CGW Security Group"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${RegionName}-cgw-sg"
+
+  Cgw:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [AmiMap, !Ref "AWS::Region", Ami]
+      InstanceType: t3.micro
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          PrivateIpAddress: !Join
+            - "."
+            - - !Select [0, !Split [".", !FindInMap [CidrMap, !Ref "AWS::Region", PubSn1Cidr]]]
+              - !Select [1, !Split [".", !FindInMap [CidrMap, !Ref "AWS::Region", PubSn1Cidr]]]
+              - !Select [2, !Split [".", !FindInMap [CidrMap, !Ref "AWS::Region", PubSn1Cidr]]]
+              - "100"
+          DeviceIndex: 0
+          GroupSet: 
+            - !Ref CgwSg
+          SubnetId: !Ref PubSn1
+      SourceDestCheck: false
+      Tags:
+        - Key : Name
+          Value : !Sub "${ProjectName}-${RegionName}-cgw"
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          echo "p@ssw0rd" | passwd --stdin root
+          sed -i "s/^#PermitRootLogin yes/PermitRootLogin yes/g" /etc/ssh/sshd_config
+          sed -i "s/^PasswordAuthentication no/PasswordAuthentication yes/g" /etc/ssh/sshd_config
+          systemctl restart sshd
+
+# DB Server & Security Group
+  DbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${AWS::Region} DB Server Security Group"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 10.0.0.0/8
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${RegionName}-db-sg"
+
+  Db:
+    Type: AWS::EC2::Instance
+    DependsOn: PriRt2DefaultRoute
+    Properties:
+      ImageId: !FindInMap [AmiMap, !Ref "AWS::Region", Ami]
+      InstanceType: t3.micro
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          PrivateIpAddress: !Join
+            - "."
+            - - !Select [0, !Split [".", !FindInMap [CidrMap, !Ref "AWS::Region", PriSn2Cidr]]]
+              - !Select [1, !Split [".", !FindInMap [CidrMap, !Ref "AWS::Region", PriSn2Cidr]]]
+              - !Select [2, !Split [".", !FindInMap [CidrMap, !Ref "AWS::Region", PriSn2Cidr]]]
+              - "100"
+          DeviceIndex: 0
+          GroupSet: 
+            - !Ref DbSg
+          SubnetId: !Ref PriSn2
+      Tags:
+        - Key : Name
+          Value : !Sub "${ProjectName}-${RegionName}-db"
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          echo "p@ssw0rd" | passwd --stdin root
+          sed -i "s/^#PermitRootLogin.*/PermitRootLogin yes/g" /etc/ssh/sshd_config
+          sed -i "s/^PasswordAuthentication.*/PasswordAuthentication yes/g" /etc/ssh/sshd_config
+          systemctl restart sshd
+          yum install -y mariadb-server
+          systemctl start mariadb
+          systemctl enable mariadb
+          wget https://raw.githubusercontent.com/gitsuhyeok05/soldesk-pjt/refs/heads/main/web_game_dama.sh
+          chmod +x web_game_dama.sh
+          sh web_game_dama.sh
+  
+  MyBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: suhk-rds-export-bucket
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldFiles
+            Status: Enabled
+            ExpirationInDays: 30
+
+...

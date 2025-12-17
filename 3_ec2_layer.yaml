@@ -1,0 +1,177 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Default EC2 stack for the Project
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project Name
+  RegionName:
+    Type: String
+    Description: Region Name
+    AllowedValues:
+      - seoul
+
+Mappings:
+  CidrMap:
+    ap-northeast-2:
+      VpcCidr: 10.1.0.0/16
+      PubSn1Cidr: 10.1.1.0/24
+      PubSn2Cidr: 10.1.2.0/24
+      WebSn3Cidr: 10.1.3.0/24
+      WebSn4Cidr: 10.1.4.0/24
+  AmiMap:
+    ap-northeast-2:
+      Ami: ami-0f970a44e02f25083
+
+Resources:
+# Web Application Load Balancer & Security Group
+  WebAlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !ImportValue VpcId
+      GroupDescription: !Sub "${AWS::Region} Web ALB Security Group"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key : Name
+          Value : !Sub "${ProjectName}-${RegionName}-web-alb-sg"
+
+  WebAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Name: !Sub "${ProjectName}-${RegionName}-web-alb"
+      SecurityGroups:
+        - !Ref WebAlbSg
+      Subnets:
+        - !ImportValue PubSn1Id
+        - !ImportValue PubSn2Id
+
+  WebAlbTg:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-${RegionName}-web-tg"
+      Port: 80
+      Protocol: HTTP
+      HealthCheckPath: '/'
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      VpcId: !ImportValue VpcId
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: true
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 3600
+      Tags:
+        - Key : Name
+          Value : !Sub "${ProjectName}-${RegionName}-web-tg"
+
+  WebAlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebAlbTg
+      LoadBalancerArn: !Ref WebAlb
+      Port: 80
+      Protocol: HTTP
+
+# LaunchTemplate & Security Group
+  WebSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !ImportValue VpcId
+      GroupDescription: !Sub "${AWS::Region} Web Instance Security Group"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !FindInMap [CidrMap, ap-northeast-2, PubSn2Cidr]
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref WebAlbSg
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 10.0.0.0/8
+      Tags:
+        - Key : Name
+          Value : !Sub "${ProjectName}-${RegionName}-web-sg"
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${ProjectName}-${RegionName}-lt"
+      VersionDescription: version 1.0
+      LaunchTemplateData:
+        ImageId: !FindInMap [AmiMap, !Ref "AWS::Region", Ami]
+        InstanceType: t3.micro
+        SecurityGroupIds:
+          - !Ref WebSg
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            echo "p@ssw0rd" | passwd --stdin root
+            sed -i "s/^#PermitRootLogin.*/PermitRootLogin yes/g" /etc/ssh/sshd_config
+            sed -i "s/^PasswordAuthentication.*/PasswordAuthentication yes/g" /etc/ssh/sshd_config
+            systemctl restart sshd
+            yum install -y httpd mariadb-server php php-mysql php-gd
+            amazon-linux-extras install -y php8.2
+            yum install -y php php-mbstring php-mysqli php-fpm php-json php-xml
+            wget https://github.com/gitsuhyeok05/soldesk-pjt/raw/refs/heads/main/damagochi_web.zip
+            unzip damagochi_web.zip
+            mv damagochi_web/* /var/www/html/
+            cd /var/www/html
+            mv composer.phar /usr/local/bin/composer
+            ln -s /usr/local/bin/composer /usr/bin/composer
+            cd /usr/local/bin/
+            chmod +x composer
+            cd /var/www/html
+            composer require aws/aws-sdk-php:^3.0
+            echo SetEnv AWS_ACCESS_KEY_ID "KeyID" >> /etc/httpd/conf/httpd.conf
+            echo SetEnv AWS_SECRET_ACCESS_KEY "KeyPass" >> /etc/httpd/conf/httpd.conf
+            echo SetEnv AWS_DEFAULT_REGION "ap-northeast-2" >> /etc/httpd/conf/httpd.conf
+            systemctl restart httpd
+
+#            systemctl start httpd mariadb
+#            systemctl enable httpd mariadb
+
+# Auto Scaling Group & Scaling Policy
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${ProjectName}-${RegionName}-asg"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - !ImportValue WebSn3Id
+        - !ImportValue WebSn4Id
+      TargetGroupARNs:
+        - !Ref WebAlbTg
+      DesiredCapacity: 2
+      MinSize: 2
+      MaxSize: 4
+
+  ScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50
+...
