@@ -15,3 +15,5 @@ OpneVPN, Site-to-SiteVPN을 활용한 안전한 원격 접속 환경 구축
 ALB, AutoScaling을 이용한 고가용성 탄력적 운영
 ACM과 WAF를 활용한 웹서비스 보안
 동물 키우기(다마고치) 웹 게임 서비스 구현
+
+<img src="https://github.com/gitsuhyeok05/soldesk-AWS-pjt1/blob/main/1%EC%B0%A8%ED%94%84%EB%A1%9C%EC%A0%9D%ED%8A%B8-%EA%B9%80%EC%88%98%ED%98%81.drawio.png?raw=true">
